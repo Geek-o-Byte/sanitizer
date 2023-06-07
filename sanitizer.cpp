@@ -1,60 +1,55 @@
 #include "sanitizer.h"
 #include <dlfcn.h>
 #include <pthread.h>
-#include <unordered_map>
-#include <vector>
 
-std::unordered_map<pthread_mutex_t*, pthread_t> mutex_lock_map;
-std::vector<pthread_mutex_t*> mutex_lock_stack;
-bool deadlock_found = false;
+MutexGraph mutexGraph;
+DeadlockData deadlockData;
 
 static int (*orig_pthread_mutex_lock)(pthread_mutex_t *mutex) = (int (*)(pthread_mutex_t *))dlsym(RTLD_NEXT, "pthread_mutex_lock");
 static int (*orig_pthread_mutex_unlock)(pthread_mutex_t *mutex) = (int (*)(pthread_mutex_t *))dlsym(RTLD_NEXT, "pthread_mutex_unlock");
 
-std::unordered_map<pthread_mutex_t*, std::vector<pthread_mutex_t*>> mutex_graph;
-
 extern "C" {
-int pthread_mutex_lock(pthread_mutex_t* mutex) {
-    mutex_lock_map[mutex] = pthread_self();
-    mutex_lock_stack.push_back(mutex);
+    int pthread_mutex_lock(pthread_mutex_t* mutex) {
+        deadlockData.lockMap[mutex] = pthread_self();
+        deadlockData.lockStack.push_back(mutex);
 
-    // Добавление мьютекса в граф и создание ребер от предыдущих мьютексов
-    if (!mutex_lock_stack.empty()) {
-        pthread_mutex_t* prev_mutex = mutex_lock_stack.back();
-        mutex_graph[prev_mutex].push_back(mutex);
+        // Добавление мьютекса в граф и создание ребер от предыдущих мьютексов
+        if (!deadlockData.lockStack.empty()) {
+            pthread_mutex_t* prevMutex = deadlockData.lockStack.back();
+            mutexGraph.graph[prevMutex].push_back(mutex);
+        }
+
+        checkDeadlock(mutexGraph, deadlockData);
+
+        return orig_pthread_mutex_lock(mutex);
     }
 
-    check_deadlock();
+    int pthread_mutex_unlock(pthread_mutex_t* mutex) {
+        deadlockData.lockMap.erase(mutex);
+        deadlockData.lockStack.pop_back();
 
-    return orig_pthread_mutex_lock(mutex);
+        // Удаление мьютекса из графа
+        mutexGraph.graph.erase(mutex);
+
+        checkDeadlock(mutexGraph, deadlockData);
+
+        return orig_pthread_mutex_unlock(mutex);
+    }
 }
 
-int pthread_mutex_unlock(pthread_mutex_t* mutex) {
-    mutex_lock_map.erase(mutex);
-    mutex_lock_stack.pop_back();
-
-    // Удаление мьютекса из графа
-    mutex_graph.erase(mutex);
-
-    check_deadlock();
-
-    return orig_pthread_mutex_unlock(mutex);
-}
-}
-
-void check_deadlock_helper(pthread_mutex_t* mutex, std::unordered_map<pthread_mutex_t*, int>& color) {
+void checkDeadlockHelper(pthread_mutex_t* mutex, std::unordered_map<pthread_mutex_t*, int>& color, MutexGraph& mutexGraph, DeadlockData& deadlockData) {
     color[mutex] = 1;
 
-    for (pthread_mutex_t* next_mutex : mutex_graph[mutex]) {
-        if (color[next_mutex] == 0) {
-            check_deadlock_helper(next_mutex, color);
+    for (pthread_mutex_t* nextMutex : mutexGraph.graph[mutex]) {
+        if (color[nextMutex] == 0) {
+            checkDeadlockHelper(nextMutex, color, mutexGraph, deadlockData);
 
-            if (deadlock_found) {
+            if (deadlockData.deadlockFound) {
                 return;
             }
         }
-        else if (color[next_mutex] == 1 && mutex_lock_map[next_mutex] == pthread_self()) {
-            deadlock_found = true;
+        else if (color[nextMutex] == 1 && deadlockData.lockMap[nextMutex] == pthread_self()) {
+            deadlockData.deadlockFound = true;
             return;
         }
     }
@@ -62,18 +57,18 @@ void check_deadlock_helper(pthread_mutex_t* mutex, std::unordered_map<pthread_mu
     color[mutex] = 2;
 }
 
-void check_deadlock() {
-    if (deadlock_found) {
+void checkDeadlock(MutexGraph& mutexGraph, DeadlockData& deadlockData) {
+    if (deadlockData.deadlockFound) {
         return;
     }
 
     std::unordered_map<pthread_mutex_t*, int> color;
 
-    for (auto it = mutex_lock_map.begin(); it != mutex_lock_map.end(); ++it) {
+    for (auto it = deadlockData.lockMap.begin(); it != deadlockData.lockMap.end(); ++it) {
         pthread_mutex_t* mutex = it->first;
 
         if (color[mutex] == 0) {
-            check_deadlock_helper(mutex, color);
+            checkDeadlockHelper(mutex, color, mutexGraph, deadlockData);
         }
     }
 }

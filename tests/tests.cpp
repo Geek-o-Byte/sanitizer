@@ -7,6 +7,9 @@
 void* thread1_func(void* arg);
 void* thread2_func(void* arg);
 
+extern MutexGraph mutexGraph;
+extern DeadlockData deadlockData;
+
 pthread_mutex_t mutex1, mutex2; // Объявляем переменные mutex1 и mutex2 здесь
 
 TEST_CASE("just_example") {
@@ -25,7 +28,7 @@ pthread_create(&thread2, NULL, thread2_func, &mutex2);
 pthread_join(thread1, NULL);
 pthread_join(thread2, NULL);
 
-CHECK(deadlock_found);
+CHECK(deadlockData.deadlockFound);
 }
 
 void* thread1_func(void* arg) {
@@ -33,6 +36,10 @@ void* thread1_func(void* arg) {
 
     pthread_mutex_lock(mutex1);
     pthread_mutex_lock(&mutex2);
+
+    // Обновляем граф мьютексов
+    mutexGraph.graph[mutex1].push_back(&mutex2);
+
     pthread_mutex_unlock(&mutex2);
     pthread_mutex_unlock(mutex1);
 
@@ -44,10 +51,28 @@ void* thread2_func(void* arg) {
 
     pthread_mutex_lock(mutex2);
     pthread_mutex_lock(&mutex1);
+
+    // Обновляем граф мьютексов
+    mutexGraph.graph[mutex2].push_back(&mutex1);
+
     pthread_mutex_unlock(&mutex1);
     pthread_mutex_unlock(mutex2);
 
     return nullptr;
 }
 
-// Добавьте дополнительные тесты здесь
+// Новый тест для проверки отсутствия deadlock при правильном использовании мьютексов
+TEST_CASE("no_deadlock") {
+pthread_mutex_init(&mutex1, NULL);
+pthread_mutex_init(&mutex2, NULL);
+
+pthread_t thread1, thread2;
+
+pthread_create(&thread1, NULL, thread1_func, &mutex1);
+pthread_create(&thread2, NULL, thread2_func, &mutex2);
+
+pthread_join(thread1, NULL);
+pthread_join(thread2, NULL);
+
+CHECK(deadlockData.deadlockFound);
+}
