@@ -18,6 +18,12 @@ int pthread_mutex_lock(pthread_mutex_t* mutex) {
     mutex_lock_map[mutex] = pthread_self();
     mutex_lock_stack.push_back(mutex);
 
+    // Добавление мьютекса в граф и создание ребер от предыдущих мьютексов
+    if (!mutex_lock_stack.empty()) {
+        pthread_mutex_t* prev_mutex = mutex_lock_stack.back();
+        mutex_graph[prev_mutex].push_back(mutex);
+    }
+
     check_deadlock();
 
     return orig_pthread_mutex_lock(mutex);
@@ -26,6 +32,9 @@ int pthread_mutex_lock(pthread_mutex_t* mutex) {
 int pthread_mutex_unlock(pthread_mutex_t* mutex) {
     mutex_lock_map.erase(mutex);
     mutex_lock_stack.pop_back();
+
+    // Удаление мьютекса из графа
+    mutex_graph.erase(mutex);
 
     check_deadlock();
 
