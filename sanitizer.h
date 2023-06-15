@@ -1,8 +1,8 @@
 #pragma once
 
+#include <pthread.h>
 #include <unordered_map>
 #include <vector>
-#include <pthread.h>
 
 struct MutexGraph {
     std::unordered_map<pthread_mutex_t *, std::vector<pthread_mutex_t *>> graph;

@@ -1,77 +1,112 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
-#include <doctest.h>
+#include "doctest.h"
 #include <pthread.h>
-#include <sanitizer.h>
+#include "sanitizer.h"
 
-// Декларация функций-заглушек для создания потоков
-void *thread1_func(void *arg);
-void *thread2_func(void *arg);
+// Test Case 1: No Deadlock
+TEST_CASE("No Deadlock") {
+    pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
 
-extern MutexGraph mutexGraph;
-extern DeadlockData deadlockData;
+    auto thread1 = [](void* arg) -> void* {
+        pthread_mutex_lock(&mutex1);
+        pthread_mutex_lock(&mutex2);
+        // Critical section
+        pthread_mutex_unlock(&mutex2);
+        pthread_mutex_unlock(&mutex1);
+        return NULL;
+    };
 
-pthread_mutex_t mutex1, mutex2; // Объявляем переменные mutex1 и mutex2 здесь
+    auto thread2 = [](void* arg) -> void* {
+        pthread_mutex_lock(&mutex1);
+        pthread_mutex_lock(&mutex2);
+        // Critical section
+        pthread_mutex_unlock(&mutex2);
+        pthread_mutex_unlock(&mutex1);
+        return NULL;
+    };
 
-TEST_CASE("just_example") { CHECK(4 == 4); }
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, thread1, NULL);
+    pthread_create(&t2, NULL, thread2, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
 
-TEST_CASE("deadlock_detection") {
-  pthread_mutex_init(&mutex1, NULL);
-  pthread_mutex_init(&mutex2, NULL);
-
-  pthread_t thread1, thread2;
-
-  pthread_create(&thread1, NULL, thread1_func, &mutex1);
-  pthread_create(&thread2, NULL, thread2_func, &mutex2);
-
-  pthread_join(thread1, NULL);
-  pthread_join(thread2, NULL);
-
-  CHECK(deadlockData.deadlockFound);
+    // No deadlock should be detected
+    CHECK(!deadlockData.deadlockFound);
 }
 
-void *thread1_func(void *arg) {
-  pthread_mutex_t *mutex1 = static_cast<pthread_mutex_t *>(arg);
+// Test Case 2: Potential Deadlock
+TEST_CASE("Potential Deadlock") {
+    pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t mutex2 = PTHREAD_MUTEX_INITIALIZER;
 
-  pthread_mutex_lock(mutex1);
-  pthread_mutex_lock(&mutex2);
+    auto thread1 = [](void* arg) -> void* {
+        pthread_mutex_lock(&mutex1);
+        pthread_mutex_lock(&mutex2);
+        // Critical section
+        pthread_mutex_unlock(&mutex2);
+        pthread_mutex_unlock(&mutex1);
+        return NULL;
+    };
 
-  // Обновляем граф мьютексов
-  mutexGraph.graph[mutex1].push_back(&mutex2);
+    auto thread2 = [](void* arg) -> void* {
+        pthread_mutex_lock(&mutex2);
+        pthread_mutex_lock(&mutex1);
+        // Critical section
+        pthread_mutex_unlock(&mutex1);
+        pthread_mutex_unlock(&mutex2);
+        return NULL;
+    };
 
-  pthread_mutex_unlock(&mutex2);
-  pthread_mutex_unlock(mutex1);
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, thread1, NULL);
+    pthread_create(&t2, NULL, thread2, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
 
-  return nullptr;
+    // Potential deadlock should be detected
+    CHECK(deadlockData.deadlockFound);
 }
 
-void *thread2_func(void *arg) {
-  pthread_mutex_t *mutex2 = static_cast<pthread_mutex_t *>(arg);
+// Test Case 3: No Deadlock (Nested Lock)
+TEST_CASE("No Deadlock (Nested Lock)") {
+    pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
 
-  pthread_mutex_lock(mutex2);
-  pthread_mutex_lock(&mutex1);
+    auto thread1 = [](void* arg) -> void* {
+        pthread_mutex_lock(&mutex1);
+        pthread_mutex_lock(&mutex1);
+        // Critical section
+        pthread_mutex_unlock(&mutex1);
+        pthread_mutex_unlock(&mutex1);
+        return NULL;
+    };
 
-  // Обновляем граф мьютексов
-  mutexGraph.graph[mutex2].push_back(&mutex1);
+    pthread_t t1;
+    pthread_create(&t1, NULL, thread1, NULL);
+    pthread_join(t1, NULL);
 
-  pthread_mutex_unlock(&mutex1);
-  pthread_mutex_unlock(mutex2);
-
-  return nullptr;
+    // No deadlock should be detected
+    CHECK(!deadlockData.deadlockFound);
 }
 
-// Новый тест для проверки отсутствия deadlock при правильном использовании
-// мьютексов
-TEST_CASE("no_deadlock") {
-  pthread_mutex_init(&mutex1, NULL);
-  pthread_mutex_init(&mutex2, NULL);
+// Test Case 4: Potential Deadlock (Self-Lock)
+TEST_CASE("Potential Deadlock (Self-Lock)") {
+    pthread_mutex_t mutex1 = PTHREAD_MUTEX_INITIALIZER;
 
-  pthread_t thread1, thread2;
+    auto thread1 = [](void* arg) -> void* {
+        pthread_mutex_lock(&mutex1);
+        pthread_mutex_lock(&mutex1);
+        // Critical section
+        pthread_mutex_unlock(&mutex1);
+        pthread_mutex_unlock(&mutex1);
+        return NULL;
+    };
 
-  pthread_create(&thread1, NULL, thread1_func, &mutex1);
-  pthread_create(&thread2, NULL, thread2_func, &mutex2);
+    pthread_t t1;
+    pthread_create(&t1, NULL, thread1, NULL);
+    pthread_join(t1, NULL);
 
-  pthread_join(thread1, NULL);
-  pthread_join(thread2, NULL);
-
-  CHECK(deadlockData.deadlockFound);
+    // Potential deadlock should be detected
+    CHECK(deadlockData.deadlockFound);
 }
