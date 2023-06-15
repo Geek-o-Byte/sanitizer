@@ -1,102 +1,89 @@
-#include <pthread.h>
-#include <dlfcn.h>
-#include <map>
-#include <vector>
-#include <algorithm>
-#include <iostream>
-#include <stdlib.h>
 #include "sanitizer.h"
-using namespace std;
-
-bool detectCycle(pthread_mutex_t *mutex, MutexGraph &mutexGraph, unordered_map<pthread_mutex_t *, int> &colors);
-
-static int (*orig_pthread_mutex_lock)(pthread_mutex_t *__mutex) = NULL;
-static int (*orig_pthread_mutex_unlock)(pthread_mutex_t *__mutex) = NULL;
+#include <dlfcn.h>
+#include <pthread.h>
 
 MutexGraph mutexGraph;
 DeadlockData deadlockData;
 
-pthread_mutex_t san_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int (*orig_pthread_mutex_lock)(pthread_mutex_t *mutex) =
+    (int (*)(pthread_mutex_t *))dlsym(RTLD_NEXT, "pthread_mutex_lock");
+static int (*orig_pthread_mutex_unlock)(pthread_mutex_t *mutex) =
+    (int (*)(pthread_mutex_t *))dlsym(RTLD_NEXT, "pthread_mutex_unlock");
 
 extern "C" {
-int pthread_mutex_lock(pthread_mutex_t *__mutex) {
-    if (orig_pthread_mutex_lock == NULL) {
-        orig_pthread_mutex_lock = (int (*)(pthread_mutex_t *)) dlsym(RTLD_NEXT, "pthread_mutex_lock");
-    }
-    if (orig_pthread_mutex_unlock == NULL) {
-        orig_pthread_mutex_unlock = (int (*)(pthread_mutex_t *)) dlsym(RTLD_NEXT, "pthread_mutex_unlock");
-    }
+int pthread_mutex_lock(pthread_mutex_t *mutex) {
+  deadlockData.lockMap[mutex] = pthread_self();
+  deadlockData.lockStack.push_back(mutex);
 
-    orig_pthread_mutex_lock(&san_mutex);
-    deadlockData.lockMap[__mutex] = pthread_self();
-    deadlockData.lockStack.push_back(__mutex);
+  // Добавление мьютекса в граф и создание ребер от предыдущих мьютексов
+  if (!deadlockData.lockStack.empty()) {
+    pthread_mutex_t *prevMutex = deadlockData.lockStack.back();
+    mutexGraph.graph[prevMutex].push_back(mutex);
+  }
 
-    if (!deadlockData.lockStack.empty()) {
-        pthread_mutex_t *prevMutex = deadlockData.lockStack.back();
-        mutexGraph.graph[prevMutex].push_back(__mutex);
-    }
+  checkDeadlock(mutexGraph, deadlockData);
 
-    checkDeadlock(mutexGraph, deadlockData);
-
-    orig_pthread_mutex_unlock(&san_mutex);
-
-    return orig_pthread_mutex_lock(__mutex);
+  return orig_pthread_mutex_lock(mutex);
 }
 
-int pthread_mutex_unlock(pthread_mutex_t *__mutex) {
-    if (orig_pthread_mutex_lock == NULL) {
-        orig_pthread_mutex_lock = (int (*)(pthread_mutex_t *)) dlsym(RTLD_NEXT, "pthread_mutex_lock");
-    }
-    if (orig_pthread_mutex_unlock == NULL) {
-        orig_pthread_mutex_unlock = (int (*)(pthread_mutex_t *)) dlsym(RTLD_NEXT, "pthread_mutex_unlock");
-    }
+int pthread_mutex_unlock(pthread_mutex_t *mutex) {
+  deadlockData.lockMap.erase(mutex);
+  deadlockData.lockStack.pop_back();
 
-    orig_pthread_mutex_lock(&san_mutex);
-    deadlockData.lockMap.erase(__mutex);
-    deadlockData.lockStack.pop_back();
+  // Удаление мьютекса из графа
+  mutexGraph.graph.erase(mutex);
 
-    mutexGraph.graph.erase(__mutex);
+  checkDeadlock(mutexGraph, deadlockData);
 
-    checkDeadlock(mutexGraph, deadlockData);
-
-    orig_pthread_mutex_unlock(&san_mutex);
-
-    return orig_pthread_mutex_unlock(__mutex);
+  return orig_pthread_mutex_unlock(mutex);
 }
+}
+
+void checkDeadlockHelper(pthread_mutex_t *mutex,
+                         std::unordered_map<pthread_mutex_t *, int> &color,
+                         MutexGraph &mutexGraph, DeadlockData &deadlockData) {
+  color[mutex] = 1;
+
+  for (pthread_mutex_t *nextMutex : mutexGraph.graph[mutex]) {
+    if (color[nextMutex] == 0) {
+      checkDeadlockHelper(nextMutex, color, mutexGraph, deadlockData);
+
+      if (deadlockData.deadlockFound) {
+        return;
+      } else if (color[nextMutex] == 1 &&
+                 deadlockData.lockMap[nextMutex] != pthread_self()) {
+        // Взаимная блокировка обнаружена
+        deadlockData.deadlockFound = true;
+        return;
+      }
+
+      if (deadlockData.deadlockFound) {
+        return;
+      }
+    } else if (color[nextMutex] == 1 &&
+               deadlockData.lockMap[nextMutex] == pthread_self()) {
+      deadlockData.deadlockFound = true;
+      return;
+    }
+  }
+
+  color[mutex] = 2;
 }
 
 void checkDeadlock(MutexGraph &mutexGraph, DeadlockData &deadlockData) {
-    unordered_map<pthread_mutex_t *, int> colors;
+  if (deadlockData.deadlockFound) {
+    return;
+  }
 
-    for (auto it = mutexGraph.graph.begin(); it != mutexGraph.graph.end(); ++it) {
-        pthread_mutex_t *mutex = it->first;
-        colors[mutex] = 0;  // Color::WHITE
+  std::unordered_map<pthread_mutex_t *, int> color;
+  deadlockData.deadlockFound = false;
+
+  for (auto it = deadlockData.lockMap.begin(); it != deadlockData.lockMap.end();
+       ++it) {
+    pthread_mutex_t *mutex = it->first;
+
+    if (color[mutex] == 0) {
+      checkDeadlockHelper(mutex, color, mutexGraph, deadlockData);
     }
-
-    for (auto it = mutexGraph.graph.begin(); it != mutexGraph.graph.end(); ++it) {
-        pthread_mutex_t *mutex = it->first;
-        if (colors[mutex] == 0) {  // Color::WHITE
-            if (detectCycle(mutex, mutexGraph, colors)) {
-                cout << "potential deadlock found" << endl;
-                deadlockData.deadlockFound = true;
-                break;
-            }
-        }
-    }
-}
-
-bool detectCycle(pthread_mutex_t *mutex, MutexGraph &mutexGraph, unordered_map<pthread_mutex_t *, int> &colors) {
-    colors[mutex] = 1;  // Color::GRAY
-
-    for (pthread_mutex_t *nextMutex : mutexGraph.graph[mutex]) {
-        if (colors[nextMutex] == 1) {  return true;  // Cycle detected
-        } else if (colors[nextMutex] == 0) {  // Color::WHITE
-            if (detectCycle(nextMutex, mutexGraph, colors)) {
-                return true;  // Cycle detected
-            }
-        }
-    }
-
-    colors[mutex] = 2;  // Color::BLACK
-    return false;  // No cycle detected
+  }
 }
